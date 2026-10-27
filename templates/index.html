@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emotion Music Player</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#111; color:#eee; text-align:center; margin:0; padding:20px; }
+  video { width:100%; max-width:480px; border-radius:12px; transform:scaleX(-1); background:#000; }
+  button { font-size:18px; padding:12px 28px; border:0; border-radius:8px; background:#22c55e; color:#000; cursor:pointer; margin:14px 0; }
+  #emotion { font-size:28px; font-weight:700; margin:8px 0; }
+  #status, #song { color:#aaa; margin:4px 0; }
+  audio { width:100%; max-width:480px; margin-top:10px; }
+</style>
+</head>
+<body>
+  <h1>Emotion Music Player</h1>
+  <video id="video" autoplay playsinline muted></video><br>
+  <button id="startBtn">Start</button>
+  <div id="emotion">-</div>
+  <div id="status">Click Start and allow camera access</div>
+  <div id="song"></div>
+  <audio id="player" controls></audio>
+  <canvas id="canvas" width="320" height="240" style="display:none"></canvas>
+
+<script>
+const MOOD_QUERIES = {
+  Happy:    ["happy", "feel good", "upbeat pop"],
+  Sad:      ["sad piano", "melancholy", "emotional"],
+  Angry:    ["rock", "metal", "aggressive"],
+  Fear:     ["ambient", "calm", "meditation"],
+  Disgust:  ["chill", "lofi", "relaxing"],
+  Surprise: ["electronic dance", "party", "energetic"],
+  Neutral:  ["lounge", "acoustic", "easy listening"]
+};
+const APP_NAME = "EmotionMusicPlayer";
+const SMOOTHING = 5;          // predictions used for a stable emotion
+const COOLDOWN_MS = 20000;    // minimum time between emotion-based song changes
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const player = document.getElementById("player");
+const emotionEl = document.getElementById("emotion");
+const statusEl = document.getElementById("status");
+const songEl = document.getElementById("song");
+
+let recent = [], currentEmotion = null, lastChange = 0, busy = false, host = null;
+
+async function getHost() {
+  if (host) return host;
+  const r = await fetch("https://api.audius.co");
+  const j = await r.json();
+  host = j.data[Math.floor(Math.random() * j.data.length)];
+  return host;
+}
+
+async function playForEmotion(emotion) {
+  try {
+    const h = await getHost();
+    const q = MOOD_QUERIES[emotion][Math.floor(Math.random() * 3)];
+    const r = await fetch(`${h}/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=${APP_NAME}`);
+    const j = await r.json();
+    const tracks = (j.data || []).filter(t => t.is_streamable !== false).slice(0, 20);
+    if (!tracks.length) { statusEl.textContent = "No songs found, retrying..."; host = null; return false; }
+    const t = tracks[Math.floor(Math.random() * tracks.length)];
+    player.src = `${h}/v1/tracks/${t.id}/stream?app_name=${APP_NAME}`;
+    await player.play();
+    songEl.textContent = `Now playing: ${t.title} - ${t.user.name}`;
+    return true;
+  } catch (e) {
+    console.error(e);
+    host = null;
+    statusEl.textContent = "Music error, will retry...";
+    return false;
+  }
+}
+
+player.addEventListener("ended", () => { if (currentEmotion) playForEmotion(currentEmotion); });
+
+async function tick() {
+  if (busy) return;
+  busy = true;
+  try {
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    const image = canvas.toDataURL("image/jpeg", 0.7);
+    const res = await fetch("/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image })
+    });
+    const d = await res.json();
+
+    if (!d.face) {
+      statusEl.textContent = "No face detected";
+    } else {
+      emotionEl.textContent = `${d.emotion} (${Math.round(d.confidence * 100)}%)`;
+      statusEl.textContent = "Face detected";
+      recent.push(d.emotion);
+      if (recent.length > SMOOTHING) recent.shift();
+
+      if (recent.length === SMOOTHING) {
+        const counts = {};
+        recent.forEach(e => counts[e] = (counts[e] || 0) + 1);
+        const stable = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+        const now = Date.now();
+        if (stable !== currentEmotion && now - lastChange > COOLDOWN_MS) {
+          statusEl.textContent = `Finding music for ${stable}...`;
+          if (await playForEmotion(stable)) {
+            currentEmotion = stable;
+            lastChange = now;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "Server error (it may be waking up, wait a moment)";
+  }
+  busy = false;
+}
+
+document.getElementById("startBtn").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    player.play().catch(() => {});      // unlocks audio autoplay after this click
+    document.getElementById("startBtn").style.display = "none";
+    statusEl.textContent = "Starting...";
+    setInterval(tick, 1000);
+  } catch (e) {
+    statusEl.textContent = "Camera blocked. Allow camera access and reload.";
+  }
+});
+</script>
+</body>
+</html>
